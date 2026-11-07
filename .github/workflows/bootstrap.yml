@@ -1,0 +1,23 @@
+name: bootstrap-macos-branch
+
+# One-shot: import the upstream macOS branch into this fork (the fork was created
+# with "Copy the main branch only", so the build branch is missing).
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Import upstream macOS branch
+        run: |
+          git clone --branch macOS --single-branch \
+            https://x-access-token:${{ github.token }}@github.com/1454228/macOS-DroidVM.git src
+          cd src
+          git remote add fork "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git"
+          git push fork macOS
+          git log --oneline -1
