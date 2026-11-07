@@ -138,7 +138,8 @@ jobs:
           gh release download "$POLICIES" --repo "$GITHUB_REPOSITORY" --pattern verified-root-inputs.tar.enc --dir "$RUNNER_TEMP"
           inputs="$RUNNER_TEMP/verified-root-inputs"
           mkdir -p "$inputs"
-          openssl enc -d -aes-256-cbc -pbkdf2 -pass env:ARTIFACT_KEY -in "$RUNNER_TEMP/verified-root-inputs.tar.enc" | tar -xz -C "$inputs"
+          printf '%s' "$ARTIFACT_KEY" > "$RUNNER_TEMP/.artkey"
+          openssl enc -d -aes-256-cbc -pbkdf2 -pass file:"$RUNNER_TEMP/.artkey" -in "$RUNNER_TEMP/verified-root-inputs.tar.enc" | tar -xz -C "$inputs"
           python3 ci/scripts/owner-policy-dirs.py "$inputs" "UniXNU/out/$BOARD/tree" "${{ matrix.root }}"
           if [ "${{ matrix.root }}" = macos ]; then
             python3 ci/scripts/macos-root-probe.py UniXNU/scripts/build-verified-root-probe.py device/scripts/build-verified-root-probe.py
