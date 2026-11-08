@@ -1,0 +1,52 @@
+name: quick-publish
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        required: true
+      artifact_name:
+        required: true
+      tag:
+        required: true
+permissions:
+  contents: write
+jobs:
+  pub:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Download artifact
+        run: |
+          gh run download "${{ inputs.run_id }}" -R "$GITHUB_REPOSITORY" \
+            -n "${{ inputs.artifact_name }}" -D "$RUNNER_TEMP/a"
+          cd "$RUNNER_TEMP/a"
+          f=$(ls | head -1)
+          echo "FILE=$f" >> "$GITHUB_ENV"
+          mv "$f" "/tmp/$f"
+          size=$(stat -c%s "/tmp/$f")
+          echo "SIZE=$size" >> "$GITHUB_ENV"
+          echo "$f = $size bytes"
+      - name: Split if over 2GiB
+        run: |
+          cd /tmp
+          if [ "$SIZE" -gt 2097152000 ]; then
+            split -b 1900m -d -a 2 "$FILE" "$FILE.part-"
+            rm -f "$FILE"
+            echo "MODE=split" >> "$GITHUB_ENV"
+            ls -la *.part-*
+          else
+            echo "MODE=single" >> "$GITHUB_ENV"
+          fi
+          sha256sum $FILE.part-* 2>/dev/null || sha256sum "$FILE" 2>/dev/null
+      - name: Upload release
+        run: |
+          cd /tmp
+          if gh release view "${{ inputs.tag }}" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "${{ inputs.tag }}" -R "$GITHUB_REPOSITORY" $FILE.part-* "$FILE" --clobber
+          else
+            gh release create "${{ inputs.tag }}" -R "$GITHUB_REPOSITORY" $FILE.part-* "$FILE" \
+              --title "temp" --notes "temporary"
+          fi
+          gh release view "${{ inputs.tag }}" -R "$GITHUB_REPOSITORY" --json assets -q '.assets[] | .name + " " + (.size|tostring)'
