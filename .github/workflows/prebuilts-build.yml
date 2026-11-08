@@ -15,7 +15,7 @@ jobs:
           df -h / /mnt
           sudo mkdir -p /mnt/work && sudo chown -R $(whoami): /mnt/work
           git config --global user.email "ci@local" && git config --global user.name "ci"
-          sudo apt-get update -qq && sudo apt-get install -y -qq repo openjdk-17-jdk-headless uuid-dev nasm acpica-tools
+          sudo apt-get update -qq && sudo apt-get install -y -qq repo openjdk-17-jdk-headless uuid-dev nasm acpica-tools gcc-aarch64-linux-gnu
           echo "JAVA_HOME=$(dirname $(dirname $(readlink -f $(which javac))))" >> "$GITHUB_ENV"
 
       - name: Clone meta repo (wip/hackintosh)
