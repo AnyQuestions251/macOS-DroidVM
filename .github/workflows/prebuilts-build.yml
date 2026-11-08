@@ -1,0 +1,51 @@
+name: prebuilts-build
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    steps:
+      - name: Env & disk
+        run: |
+          df -h / /mnt
+          git config --global user.email "ci@local" && git config --global user.name "ci"
+          sudo apt-get update -qq && sudo apt-get install -y -qq repo openjdk-17-jdk-headless
+          echo "JAVA_HOME=$(dirname $(dirname $(readlink -f $(which javac))))" >> "$GITHUB_ENV"
+
+      - name: Clone meta repo (wip/hackintosh)
+        run: |
+          mkdir -p /mnt/work && cd /mnt/work
+          git clone -q -b wip/hackintosh https://github.com/Droid-VM/droidvm-meta-repo.git
+          cd droidvm-meta-repo && git log --oneline -1
+
+      - name: Build EDK2 firmware
+        run: |
+          cd /mnt/work/droidvm-meta-repo
+          bash 3_build_edk2.sh
+          ls -la edk2-gunyah/edk2-gunyah*.fd
+
+      - name: Prepare crosvm soong tree (repo sync)
+        run: |
+          cd /mnt/work/droidvm-meta-repo
+          bash 1_build_crosvm_prepare.sh 2>&1 | tail -30
+
+      - name: Build crosvm (soong)
+        run: |
+          cd /mnt/work/droidvm-meta-repo
+          export OUT_DIR=/mnt/out
+          JOBS=4 bash 2_build_crosvm.sh 2>&1 | tail -40
+          ls -la crosvm_out/
+
+      - name: Collect & upload artifacts
+        run: |
+          cd /mnt/work/droidvm-meta-repo
+          tar czf /mnt/crosvm_out.tar.gz crosvm_out/
+          cp edk2-gunyah/edk2-gunyah.fd edk2-gunyah/edk2-gunyah.vars.fd /mnt/ 2>/dev/null || true
+          df -h /mnt
+          echo "=== crosvm_out 内容 ==="
+          ls -la crosvm_out/ | head -30
