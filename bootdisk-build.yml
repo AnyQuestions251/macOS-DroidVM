@@ -1,0 +1,134 @@
+name: bootdisk-build
+
+# Build the macOS 14.6.1 (23G93) boot disk (droidvm-disk.img) for the phone's DroidVM VM:
+# patched DarwinBoot.efi (256 MiB kernel limit) + osx kernel (from kernel-mainline-macos)
+# + macOS data seed + OS trust-cache bundle + ADT generated from the phone's FDT dump.
+# Repo root must contain: UniXNU.efi (extracted from the old boot disk's EFI/BOOT/BOOTAA64.EFI)
+# and generated.dtb (dumped by the final VM config via --dump-device-tree-blob).
+
+on:
+  workflow_dispatch:
+    inputs:
+      mem_mb:
+        description: VM memory MB (must equal the VM that dumped generated.dtb)
+        default: '6144'
+
+permissions:
+  contents: write
+
+jobs:
+  bootdisk:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    env:
+      ARTIFACT_KEY: ${{ secrets.ARTIFACT_KEY }}
+      TAG: '23G93'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Inputs present
+        run: |
+          ls -la UniXNU.efi generated.dtb
+          file generated.dtb
+
+      - name: Toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential gcc-aarch64-linux-gnu nasm uuid-dev python3-setuptools mtools openssl
+
+      - name: Sources (pinned trees)
+        run: python3 scripts/prepare-sources.py
+
+      - name: edk2 (pinned mu_basecore) + BaseTools
+        run: |
+          mkdir -p sources/edk2
+          git -C sources/edk2 init -q
+          git -C sources/edk2 remote add origin https://github.com/microsoft/mu_basecore.git
+          git -C sources/edk2 fetch -q --depth 1 origin cfb93724a06ff86ff5ba971413368a7809ee42a5
+          git -C sources/edk2 checkout -q --detach FETCH_HEAD
+          for s in MdePkg/Library/BaseFdtLib/libfdt MdePkg/Library/MipiSysTLib/mipisyst BaseTools/Source/C/BrotliCompress/brotli MdeModulePkg/Library/BrotliCustomDecompressLib/brotli SecurityPkg/DeviceSecurity/SpdmLib/libspdm; do
+            git -C sources/edk2 submodule update --init --recursive --depth 1 "$s"
+          done
+          make -C sources/edk2/BaseTools -j 4
+
+      - name: DarwinBoot.efi (256 MiB kernel patch)
+        run: |
+          mkdir -p artifacts/boot-inputs
+          [ -s artifacts/boot-inputs/provenance.json ] || echo '{}' > artifacts/boot-inputs/provenance.json
+          cp UniXNU.efi artifacts/boot-inputs/UniXNU.efi
+          python3 scripts/build-darwinboot.py
+
+      - name: Kernel (osx variant)
+        run: |
+          curl -fL --retry 5 -o kernel.tgz.enc "https://github.com/AnyQuestions251/macOS-DroidVM/releases/download/macos-23G93-kernel/kernel.tgz.enc"
+          ls -la kernel.tgz.enc
+          openssl enc -d -aes-256-cbc -pbkdf2 -pass env:ARTIFACT_KEY -in kernel.tgz.enc | tar -xz
+          mkdir -p build
+          cp kernel/kernel.macho build/kernel.macho
+          ls -la build
+
+      - name: Data seed
+        run: |
+          mkdir -p artifacts/data-seed
+          curl -fL --retry 5 -o scratch-data.img.enc "https://github.com/AnyQuestions251/macOS-DroidVM/releases/download/macos-data-seed/scratch-data.img.enc"
+          ls -la scratch-data.img.enc
+          openssl enc -d -aes-256-cbc -pbkdf2 -pass env:ARTIFACT_KEY \
+            -in scratch-data.img.enc -out artifacts/data-seed/scratch-data.img
+          ls -la artifacts/data-seed
+
+      - name: Trust cache bundle (OS static + System)
+        run: |
+          python3 scripts/macos-fetch-member.py StaticTrustCache --output-dir artifacts/tc-static
+          python3 scripts/macos-fetch-member.py "Cryptex1,SystemTrustCache" --output-dir artifacts/tc-system
+          ls -la artifacts/tc-static artifacts/tc-system
+          mkdir -p artifacts/boot
+          python3 scripts/make-trust-bundle.py \
+            "$(ls artifacts/tc-static/* | grep -v metadata | head -1)" \
+            "$(ls artifacts/tc-system/* | grep -v metadata | head -1)" \
+            artifacts/boot/kernel.macho.trustcache
+
+      - name: ADT + boot disk
+        env:
+          MEM_MB: ${{ inputs.mem_mb }}
+        run: |
+          python3 - <<'EOF'
+          import importlib.util, os, shutil
+          from pathlib import Path
+
+          os.environ['MACOS_KERNEL'] = str(Path('build/kernel.macho').resolve())
+          os.environ.setdefault('MACOS_LP_SIP0', '0x2')
+          spec = importlib.util.spec_from_file_location('run', 'scripts/run-macos-vm.py')
+          run = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(run)
+
+          fdt = Path('generated.dtb')
+          mem = int(os.environ['MEM_MB']) * 1024 * 1024
+          out = Path('out')
+          out.mkdir(exist_ok=True)
+          adt = out / 'kernel.macho.adt'
+          run.make_adt(fdt, hex(mem - 0xA00000 - run.fdt_pool_bytes(fdt)), '47554e5941480001',
+                       adt, cpu_regs=None, gpu=False, virtio_gpu=False)
+          required = ['mac-sandbox-permissive=1', 'mac-amfi-launch-permissive=1', 'union-hide-lower=1',
+                      'malloc-ranges-off=1', 'arm64_maxoffset=0x7FFE000000', 'mac-sandbox-skip-exec=1',
+                      'ml-timeout-lock-scale=40']
+          line = run.kernel_args(required)
+          disk = run.build_boot_disk(out / 'boot', Path('artifacts/boot/kernel.macho.trustcache'),
+                                     Path('artifacts/data-seed/scratch-data.img'), adt, line)
+          shutil.copyfile(disk, 'bootdisk-23G93.img')
+          print('KERNEL ARGS:', line)
+          EOF
+          ls -la bootdisk-23G93.img
+
+      - name: Publish to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sha256sum bootdisk-23G93.img
+          if gh release view bootdisk-23G93 -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload bootdisk-23G93 -R "$GITHUB_REPOSITORY" bootdisk-23G93.img --clobber
+          else
+            gh release create bootdisk-23G93 -R "$GITHUB_REPOSITORY" bootdisk-23G93.img \
+              --title "macOS 23G93 boot disk" \
+              --notes "droidvm-disk.img replacement: patched DarwinBoot (256MiB kernel) + osx kernel + macOS data seed + OS trust bundle + ADT (5120MB/4CPU FDT)"
+          fi
+          echo "direct link: https://github.com/$GITHUB_REPOSITORY/releases/download/bootdisk-23G93/bootdisk-23G93.img"
