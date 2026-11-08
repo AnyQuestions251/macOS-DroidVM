@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 350
     steps:
-      - name: Env & disk
+      - name: Env & disk (incl. 16G swap for soong)
         run: |
           df -h / /mnt
           sudo mkdir -p /mnt/work && sudo chown -R $(whoami): /mnt/work
@@ -18,45 +18,47 @@ jobs:
           git config --global user.email "ci@local" && git config --global user.name "ci"
           sudo apt-get update -qq && sudo apt-get install -y -qq repo openjdk-17-jdk-headless uuid-dev nasm acpica-tools gcc-aarch64-linux-gnu
           echo "JAVA_HOME=$(dirname $(dirname $(readlink -f $(which javac))))" >> "$GITHUB_ENV"
+          # GitHub standard runner has only 7GB RAM; soong OOMs. Add 16G swap on /mnt.
+          sudo fallocate -l 16G /mnt/swap.img || sudo dd if=/dev/zero of=/mnt/swap.img bs=1M count=16384
+          sudo chmod 600 /mnt/swap.img
+          sudo mkswap /mnt/swap.img
+          sudo swapon /mnt/swap.img
+          free -h
 
       - name: Clone meta repo (wip/hackintosh)
         run: |
           set -e
-          rm -rf /mnt/work && mkdir -p /mnt/work
-          cd /mnt/work
+          rm -rf /mnt/work/droidvm-meta-repo || true
+          mkdir -p /mnt/work && cd /mnt/work
           git clone -q -b wip/hackintosh https://github.com/Droid-VM/droidvm-meta-repo.git
           cd droidvm-meta-repo && git log --oneline -1
           test -d /mnt/work/droidvm-meta-repo/.git
-
-      - name: Build EDK2 firmware
-        run: |
-          cd /mnt/work/droidvm-meta-repo
-          bash 3_build_edk2.sh
-          ls -la edk2-gunyah/edk2-gunyah*.fd
 
       - name: Prepare crosvm soong tree (repo sync)
         run: |
           cd /mnt/work/droidvm-meta-repo
           bash 1_build_crosvm_prepare.sh 2>&1 | tail -30
 
-      - name: Build crosvm (soong)
+      - name: Build crosvm (soong, low parallelism)
         run: |
           cd /mnt/work/droidvm-meta-repo
           export OUT_DIR=/mnt/work/out
-          JOBS=4 bash 2_build_crosvm.sh 2>&1 | tail -60
+          # JOBS=2 + 16G swap to avoid the prior OOM (was JOBS=4 + no swap on 7GB runner)
+          JOBS=2 bash 2_build_crosvm.sh 2>&1 | tail -80
+          echo "=== crosvm_out ==="
           ls -la crosvm_out/
 
       - name: Collect & upload artifacts
         run: |
           cd /mnt/work/droidvm-meta-repo
+          ls -la crosvm_out/
           tar czf /mnt/work/artifacts/crosvm_out.tar.gz crosvm_out/
-          cp edk2-gunyah/edk2-gunyah.fd edk2-gunyah/edk2-gunyah.vars.fd /mnt/work/artifacts/
           echo "=== artifacts ==="
           ls -la /mnt/work/artifacts/
 
       - name: Upload prebuilts
         uses: actions/upload-artifact@v4
         with:
-          name: prebuilts
+          name: crosvm-prebuilt
           path: /mnt/work/artifacts/*
           if-no-files-found: error
