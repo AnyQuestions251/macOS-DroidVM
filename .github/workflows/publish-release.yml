@@ -65,8 +65,6 @@ jobs:
           else
             gh release create macos-23G93-disks -R "$GITHUB_REPOSITORY" "$D"/*.part-* "$D/SHA256SUMS" \
               --title "macOS 23G93 disks (encrypted, split <2GiB)" \
-              --notes "os-disk + systemos-disk, openssl-aes-256-cbc-pbkdf2 encrypted, split into <2GiB parts.
-Restore on device: cat os-disk-23G93.enc.part-* > os-disk-23G93.enc && openssl enc -d -aes-256-cbc -pbkdf2 -pass pass:ARTIFACT_KEY -in os-disk-23G93.enc -out os-disk.raw
-Verify: shasum -a 256 -c SHA256SUMS"
+              --notes "os-disk + systemos-disk, aes-256-cbc-pbkdf2 encrypted, split into <2GiB parts. Restore: cat os-disk-23G93.enc.part-* > os-disk-23G93.enc && openssl enc -d -aes-256-cbc -pbkdf2 -pass pass:ARTIFACT_KEY -in os-disk-23G93.enc -out os-disk.raw | Verify: shasum -a 256 -c SHA256SUMS"
           fi
           gh release view macos-23G93-disks -R "$GITHUB_REPOSITORY" --json assets -q '.assets[].name'
