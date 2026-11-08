@@ -14,6 +14,7 @@ jobs:
         run: |
           df -h / /mnt
           sudo mkdir -p /mnt/work && sudo chown -R $(whoami): /mnt/work
+          mkdir -p /mnt/work/artifacts
           git config --global user.email "ci@local" && git config --global user.name "ci"
           sudo apt-get update -qq && sudo apt-get install -y -qq repo openjdk-17-jdk-headless uuid-dev nasm acpica-tools gcc-aarch64-linux-gnu
           echo "JAVA_HOME=$(dirname $(dirname $(readlink -f $(which javac))))" >> "$GITHUB_ENV"
@@ -41,15 +42,21 @@ jobs:
       - name: Build crosvm (soong)
         run: |
           cd /mnt/work/droidvm-meta-repo
-          export OUT_DIR=/mnt/out
-          JOBS=4 bash 2_build_crosvm.sh 2>&1 | tail -40
+          export OUT_DIR=/mnt/work/out
+          JOBS=4 bash 2_build_crosvm.sh 2>&1 | tail -60
           ls -la crosvm_out/
 
       - name: Collect & upload artifacts
         run: |
           cd /mnt/work/droidvm-meta-repo
-          tar czf /mnt/crosvm_out.tar.gz crosvm_out/
-          cp edk2-gunyah/edk2-gunyah.fd edk2-gunyah/edk2-gunyah.vars.fd /mnt/ 2>/dev/null || true
-          df -h /mnt
-          echo "=== crosvm_out 内容 ==="
-          ls -la crosvm_out/ | head -30
+          tar czf /mnt/work/artifacts/crosvm_out.tar.gz crosvm_out/
+          cp edk2-gunyah/edk2-gunyah.fd edk2-gunyah/edk2-gunyah.vars.fd /mnt/work/artifacts/
+          echo "=== artifacts ==="
+          ls -la /mnt/work/artifacts/
+
+      - name: Upload prebuilts
+        uses: actions/upload-artifact@v4
+        with:
+          name: prebuilts
+          path: /mnt/work/artifacts/*
+          if-no-files-found: error
