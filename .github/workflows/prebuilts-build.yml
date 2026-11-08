@@ -42,8 +42,10 @@ jobs:
       - name: Build crosvm (soong, low parallelism)
         run: |
           cd /mnt/work/droidvm-meta-repo
-          export OUT_DIR=/mnt/work/out
-          # JOBS=2 + 16G swap to avoid the prior OOM (was JOBS=4 + no swap on 7GB runner)
+          # Do NOT override OUT_DIR: soong defaults to crosvm_build/out, which is
+          # exactly where 2-1_collect_crosvm.sh looks for out/soong/...
+          # (overriding OUT_DIR to /mnt/work/out desyncs collect -> empty pkg)
+          set -o pipefail
           JOBS=2 bash 2_build_crosvm.sh 2>&1 | tail -80
           echo "=== crosvm_out ==="
           ls -la crosvm_out/
@@ -52,6 +54,7 @@ jobs:
         run: |
           cd /mnt/work/droidvm-meta-repo
           ls -la crosvm_out/
+          test -s crosvm_out/crosvm || { echo "ERROR: crosvm binary missing in crosvm_out/"; exit 1; }
           tar czf /mnt/work/artifacts/crosvm_out.tar.gz crosvm_out/
           echo "=== artifacts ==="
           ls -la /mnt/work/artifacts/
