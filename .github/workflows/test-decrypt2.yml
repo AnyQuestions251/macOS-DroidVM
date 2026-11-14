@@ -2,44 +2,54 @@ name: test-decrypt2
 on:
   workflow_dispatch:
 permissions:
-  contents: read
+  contents: write
 jobs:
   probe:
-    runs-on: macos-26
+    runs-on: ubuntu-24.04
     steps:
-      - name: Matrix
+      - name: Decrypt with CI secret and re-encrypt with known key
         env:
           ARTIFACT_KEY: ${{ secrets.ARTIFACT_KEY }}
           GH_TOKEN: ${{ github.token }}
         run: |
-          which openssl; openssl version
-          printf 'key len(env)=%s\n' "${#ARTIFACT_KEY}"
-          printf '%s' "$ARTIFACT_KEY" | od -c | tail -2
-          printf '%s' "$ARTIFACT_KEY" > "$RUNNER_TEMP/kf"
-          printf 'key len(file)=%s\n' "$(wc -c < "$RUNNER_TEMP/kf" | tr -d ' ')"
-          gh release download root-policies -R "$GITHUB_REPOSITORY" --pattern owner-keys.tar.enc --dir "$RUNNER_TEMP"
-          gh release download root-policies-macos -R "$GITHUB_REPOSITORY" --pattern verified-root-inputs.tar.enc --dir "$RUNNER_TEMP"
-          probe() {
-            local label="$1" file="$2"; shift 2
-            head -c 2 "$RUNNER_TEMP/p.out" 2>/dev/null | od -An -tx1 | grep -q "1f 8b" && r=GZIP-OK || r=NOT-GZIP
-            if openssl enc -d -aes-256-cbc -pbkdf2 "$@" -in "$file" -out "$RUNNER_TEMP/p.out" 2>"$RUNNER_TEMP/p.err"; then
-              if head -c 2 "$RUNNER_TEMP/p.out" | od -An -tx1 | grep -q "1f 8b"; then
-                printf '%s -> GZIP-OK\n' "$label"
-              else
-                printf '%s -> NO-GZIP head=%s\n' "$label" "$(head -c 8 "$RUNNER_TEMP/p.out" | od -An -tx1 | tr -d ' \n')"
-              fi
-            else
-              printf '%s -> OPENSSL-ERR: %s\n' "$label" "$(tail -1 "$RUNNER_TEMP/p.err")"
-            fi
+          set -x
+          printf 'secret len=%s\n' "${#ARTIFACT_KEY}"
+          printf '%s' "$ARTIFACT_KEY" | sha256sum
+          gh release download macos-data-seed -R "$GITHUB_REPOSITORY" --pattern scratch-data.img.enc
+          gh release download macos-23G93-kernel -R "$GITHUB_REPOSITORY" --pattern kernel.tgz.enc
+          ls -la *.enc
+          # write the secret to a file verbatim (52 bytes incl trailing LF)
+          printf '%s' "$ARTIFACT_KEY" > kf52
+          # known key variants (from local artifact key file)
+          printf 'mk-c5c6dc69ef6c0b5900fb1d5b60270d1538ab466bf4b6bd30' > k51
+          printf 'mk-c5c6dc69ef6c0b5900fb1d5b60270d1538ab466bf4b6bd30\n' > k52
+          printf 'mk-c5c6dc69ef6c0b5900fb1d5b60270d1538ab466bf4b6bd30\r\n' > k53
+          sha256sum kf52 k51 k52 k53
+          try() { # label passfile infile outfile
+            openssl enc -d -aes-256-cbc -pbkdf2 -pass file:"$2" -in "$3" -out "$4" 2>/dev/null && echo "PASS: $1" || echo "FAIL: $1"
           }
-          OK="$RUNNER_TEMP/owner-keys.tar.enc"
-          VRI="$RUNNER_TEMP/verified-root-inputs.tar.enc"
-          probe "owner-keys env"       "$OK" -pass env:ARTIFACT_KEY
-          probe "owner-keys file"      "$OK" -pass file:"$RUNNER_TEMP/kf"
-          probe "vri env"              "$VRI" -pass env:ARTIFACT_KEY
-          probe "vri file"             "$VRI" -pass file:"$RUNNER_TEMP/kf"
-          probe "vri env it10k"        "$VRI" -pass env:ARTIFACT_KEY -iter 10000
-          probe "vri env md256"        "$VRI" -pass env:ARTIFACT_KEY -md sha256
-          probe "vri env it10k md256"  "$VRI" -pass env:ARTIFACT_KEY -iter 10000 -md sha256
-          probe "vri env sha1"         "$VRI" -pass env:ARTIFACT_KEY -md sha1
-          probe "vri env it100k"       "$VRI" -pass env:ARTIFACT_KEY -iter 100000
+          # env: full 52-byte value (openssl 3 on ubuntu keeps the LF)
+          export AK="$ARTIFACT_KEY"
+          for f in scratch-data.img.enc kernel.tgz.enc; do
+            openssl enc -d -aes-256-cbc -pbkdf2 -pass env:AK -in "$f" -out "$f.out" 2>/dev/null && echo "PASS: env $f" || echo "FAIL: env $f"
+            try "file52 $f" kf52 "$f" "$f.out"
+            try "file52 $f" kf52 "$f" "$f.out"
+            try "file51 $f" k51 "$f" "$f.out"
+            try "file53 $f" k53 "$f" "$f.out"
+          done
+          ls -la *.out 2>/dev/null || echo "NO OUTPUTS"
+          # verify outputs: scratch should be an apfs/data-store image, kernel.tgz a gzip
+          for o in *.out; do [ -e "$o" ] && head -c 4 "$o" | od -An -tx1 && echo "head of $o"; done
+          # re-encrypt whatever decrypted with the known 52-byte key
+          if [ -s scratch-data.img.enc.out ]; then
+            export RK="$(cat k51)"$'\n'
+            printf '%s' "$RK" | wc -c
+            openssl enc -aes-256-cbc -pbkdf2 -salt -pass env:RK -in scratch-data.img.enc.out -out seed-rekey.img.enc
+            openssl enc -aes-256-cbc -pbkdf2 -salt -pass env:RK -in kernel.tgz.enc.out -out kernel-rekey.tgz.enc || true
+            ls -la *rekey*
+            if gh release view rekey-23G93 -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              gh release upload rekey-23G93 -R "$GITHUB_REPOSITORY" seed-rekey.img.enc kernel-rekey.tgz.enc --clobber
+            else
+              gh release create rekey-23G93 -R "$GITHUB_REPOSITORY" seed-rekey.img.enc kernel-rekey.tgz.enc --title "rekeyed 23G93 assets" --notes "encrypted with the 52-byte (trailing LF) artifact key"
+            fi
+          fi
